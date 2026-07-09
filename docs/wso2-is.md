@@ -1,0 +1,171 @@
+Single sign on with WSO2 Identity Server (WSO2 IS)
+==================================================
+[WSO2 IS](https://is.docs.wso2.com) is an API-driven open source IAM product designed to help you build effective CIAM solutions.
+It is based on open standards such as SAML, OAuth and OIDC with the deployment options of on-premise, cloud, and hybrid.
+It supports complex IAM requirements given its high extensibility.
+
+## Install WSO2 IS
+
+### Requirement
+* JDK version 21 or newer.
+
+### Download and unzip the latest stable version of WSO2 IS (current is 7.2.0)
+```shell
+cd /opt
+wget https://github.com/wso2/product-is/releases/download/v7.2.0/wso2is-7.2.0.zip
+unzip wso2is-7.2.0.zip
+```
+
+### Deployment configuration
+* Using a text editor to open **/opt/wso2is-7.2.0/repository/conf/deployment.toml** file.
+* Edit `hostname` and `node_ip` under `[server]` section
+```toml
+[server]
+hostname = "your id server hostname"
+node_ip = "your id server ip address"
+```
+* Edit `username` and `password` under `[super_admin]` section
+```toml
+[super_admin]
+username = "your admin user"
+password = "your admin password"
+```
+* Add following content like that.
+```toml
+[cors]
+allow_generic_http_requests = true
+allow_any_origin = false
+allowed_origins = [
+    "https://your-zimbra-hostname"
+]
+allow_subdomains = false
+supported_methods = [
+    "GET",
+    "POST",
+    "HEAD",
+    "OPTIONS"
+]
+support_any_header = true
+supported_headers = []
+exposed_headers = []
+supports_credentials = true
+max_age = 3600
+tag_requests = false
+```
+
+### Running the Identity Server
+```shell
+cd /opt/wso2is-7.2.0/
+./bin/wso2server.sh start
+```
+
+### Config IS user store with Zimbra LDAP
+* Sign in to WSO2 Identity Server Management Console as an admin by visiting url `https://your-id-server-hostname:9443` from your web browser.
+* On the Main menu, click **User Attributes & Stores > User Stores > New User Store**.
+* Select **Read Only LDAP**
+* Fill in **Add Read Only LDAP User Store - General** form like that
+![add-ldap-user-store-general](wso2-is/add-ldap-user-store-general.png)
+* Fill in **Add Read Only LDAP User Store - Zimbra Ldap** form like that
+![add-ldap-user-store-user](wso2-is/add-ldap-user-store-user.png)
+* Disable **Read Group**, Click **Next**
+* Click **Finish** button to add ldap user store
+* On the Main menu, click **User Managerment > Users**
+* Click **Users** to list users from ldap
+
+### Add Service Provider for Zimbra Mail Server
+* Sign in to WSO2 Identity Server Management Console as an admin by visiting url `https://your-id-server-hostname:9443` from your web browser.
+* On the Main menu, click **Identity > Service Providers > Add**
+* Enter **Service Provider Name** and click **Register** to add service provider
+
+### Config untrusted ssl certificate of Zimbra & WSO2 IS
+On Zimbra mail server
+* Export untrusted ssl certificate to the file:
+```shell
+openssl s_client -servername your-id-server-hostname -connect your-id-server-hostname:9443 </dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' >/path/to/wso2-is.pem
+```
+* Execute following commands under the `zimbra` user:
+```shell
+zmcertmgr addcacert /path/to/wso2-is.pem
+zmprov -l mcf +zimbraCsrfAllowedRefererHosts your-id-server-hostname
+zmmailboxdctl restart
+```
+On WSO2 Is server
+* Export untrusted ssl certificate to the file:
+```shell
+openssl s_client -servername your-zimbra-hostname -connect your-zimbra-hostname:443 </dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' >/path/to/zimbra.pem
+keytool -import -alias your-zimbra-hostname -file /path/to/zimbra.pem -keystore /opt/wso2is-7.2.0/repository/resources/security/client-truststore.p12 -storepass wso2carbon
+```
+
+### Single sign on with SAML protocol
+#### Config Zimbra SSO
+* Using a text editor to open **/opt/zimbra/conf/zm.sso.properties** file.
+* Set **sso.defaultClient** to `SAML2Client`
+* Set **sso.callbackUrl** to `https://your-zimbra-hostname/service/extension/sso/callback`
+* Set **saml.callbackUrl** to `https://your-zimbra-hostname/service/extension/saml/callback`
+* Set **sso.postLogoutURL** to `https://your-zimbra-hostname/`
+* Set **saml.identityProviderMetadataPath** to `https://your-id-server-hostname:9443/identity/metadata/saml2`
+* Restart mailbox under `zimbra` user: `zmmailboxdctl restart`
+
+#### Config SAML service provider
+* Sign in to WSO2 Identity Server Management Console as an admin by visiting url `https://your-id-server-hostname:9443` from your web browser.
+* On the Main menu, click **Applications > New Application**, choose **Traditional Web Application**
+* Fill in **Traditional Web Application** form like that
+![create-saml-application](wso2-is/create-saml-application.png)
+* Click **Create** to create
+* Click on **Protocol** tab, tick **Sign SAML responses**, choose **NameID format** with
+ `urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress`,
+ choose **Logout method** with `Front Channel HTTP Post`,
+ set both **Single logout response URL** & **Single logout request URL** with
+ `https://your-zimbra-hostname/service/extension/sso/callback?client_name=SAML2Client&logoutendpoint=true`
+ check **Enable Attribute Profile**. Click **Update**.
+* Click on **User Attributes** tab, add **Email** attribute `http://wso2.org/claims/emailaddress`,
+  choose **Subject attribute** with `http://wso2.org/claims/emailaddress`. Click **Update**.
+
+#### Testing
+* Testing service provider metadata by visiting url `https://your-zimbra-hostname/service/extension/saml/metadata` from your web browser.
+* Testing single sign on by visiting url `https://your-zimbra-hostname/service/extension/saml/login` from your web browser.
+* Testing logout & single logout (SLO) by visiting url `https://your-zimbra-hostname/service/extension/sso/logout` from your web browser.
+
+#### Replace login and logout urls
+* Execute following commands with the `zimbra` user:
+```shell
+zmprov mcf zimbraWebClientLoginURL https://your-zimbra-hostname/service/extension/saml/login
+zmprov mcf zimbraWebClientLogoutURL https://your-zimbra-hostname/service/extension/sso/logout
+zmmailboxdctl restart
+```
+
+### Single sign on with OpenID Connect protocol
+#### Config OpenID Connect service provider
+* Sign in to WSO2 Identity Server Management Console as an admin by visiting url `https://your-id-server-hostname:9443` from your web browser.
+* On the Main menu, click **Applications > New Application**, choose **Traditional Web Application**
+* Fill in **Traditional Web Application** form like that
+![create-oidc-application](wso2-is/create-oidc-application.png)
+* On **Protocol** tab, fill **Allowed origins** with `https://your-zimbra-hostname`, fill **Backchannel Logout Url** with
+ `https://your-zimbra-hostname/service/extension/oidc/callback?client_name=OidcClient&logoutendpoint=true`, Click **Update**
+* On **User Attributes** tab, check **Email**, check **Assign alternate subject indentifier**,
+  choose **Subject attribute** with `Email`, Click **Update**
+
+#### Config Zimbra SSO
+* Using a text editor to open **/opt/zimbra/conf/zm.sso.properties** file.
+* Set **sso.defaultClient** to `OidcClient`
+* Set **sso.callbackUrl** to `https://your-zimbra-hostname/service/extension/sso/callback`
+* Set **oidc.callbackUrl** to `https://your-zimbra-hostname/service/extension/oidc/callback`
+* Set **sso.postLogoutURL** to `https://your-zimbra-hostname/`
+* Set **oidc.discoveryUri** to `https://your-id-server-hostname:9443/oauth2/oidcdiscovery/.well-known/openid-configuration`
+* Set **oidc.id** to `Client ID`
+* Set **oidc.secret** to `Client secret`
+* Restart mailbox under `zimbra` user: `zmmailboxdctl restart`
+
+**Notes**: You can get `OAuth Client Key` and `OAuth Client Secret` from **Inbound Authentication Configuration -> OAuth/OpenID Connect Configuration** on OpenID Connect service provider that you configured
+
+#### Testing
+* Testing single sign on by visiting url `https://your-zimbra-hostname/service/extension/oidc/login` from your web browser.
+* Testing logout & single logout (SLO) by visiting url `https://your-zimbra-hostname/service/extension/sso/logout` from your web browser.
+
+#### Replace login and logout urls
+* Execute following commands with the `zimbra` user:
+```shell
+zmprov mcf zimbraWebClientLoginURL https://your-zimbra-hostname/service/extension/oidc/login
+zmprov mcf zimbraWebClientLogoutURL https://your-zimbra-hostname/service/extension/sso/logout
+zmmailboxdctl restart
+```
