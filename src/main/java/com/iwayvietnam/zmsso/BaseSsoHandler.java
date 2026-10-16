@@ -59,6 +59,11 @@ public abstract class BaseSsoHandler extends ExtensionHttpHandler {
     }
 
     protected void doLogin(final HttpServletRequest request, final HttpServletResponse response, final Client client) throws IOException, ServiceException {
+        // Extend the Jetty session timeout so the OIDC profile survives the
+        // Keycloak access token (5 min) and Keycloak idle timeout (30 min).
+        // Without this, the JSESSION expires at the webdefault.xml setting.
+        extendSessionTimeout(request);
+
         if (!isLoggedIn(request)) {
             Log.sso.info("SSO login with: %s", client.getName());
             request.getSession().setAttribute(SSO_CLIENT_NAME_SESSION_ATTR, client.getName());
@@ -170,5 +175,19 @@ public abstract class BaseSsoHandler extends ExtensionHttpHandler {
     private void redirectToMail(final HttpServletRequest request, final HttpServletResponse response) throws IOException, ServiceException {
         final var redirectUrl = AuthUtil.getRedirectURL(request, Provisioning.getInstance().getLocalServer(), false, true) + AuthUtil.IGNORE_LOGIN_URL;
         response.sendRedirect(redirectUrl);
+    }
+
+    /**
+     * Extends the HTTP session timeout to 30 minutes so that the OIDC profile
+     * (containing the refresh token) survives between keepalive calls.
+     * The default Jetty webdefault.xml may set a shorter timeout (e.g., 5 min).
+     */
+    private static final int SESSION_TIMEOUT_SECONDS = 30 * 60;
+
+    private static void extendSessionTimeout(final HttpServletRequest request) {
+        final var session = request.getSession(false);
+        if (session != null) {
+            session.setMaxInactiveInterval(SESSION_TIMEOUT_SECONDS);
+        }
     }
 }
