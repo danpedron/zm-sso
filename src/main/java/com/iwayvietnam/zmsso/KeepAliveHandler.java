@@ -128,14 +128,14 @@ public class KeepAliveHandler extends BaseSsoHandler {
         Log.sso.info("KeepAlive: OIDC profile expired, attempting token refresh");
 
         final var config = configBuilder.getConfig();
-        final Optional<Client> optClient = config.getClients().findClient(OidcClient.class);
+        final Optional<OidcClient> optClient = config.getClients().findClient(OidcClient.class);
         if (optClient.isEmpty()) {
             Log.sso.warn("KeepAlive: no OidcClient found, cannot refresh");
             sendResponse(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "No OIDC client configured");
             return;
         }
 
-        final var oidcClient = (OidcClient) optClient.get();
+        final var oidcClient = optClient.get();
         final var context = config.getWebContextFactory().newContext(request, response);
         final var sessionStore = config.getSessionStoreFactory().newSessionStore();
 
