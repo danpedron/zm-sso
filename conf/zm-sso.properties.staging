@@ -4,12 +4,12 @@
 # Enable one-by-one for pilot group, per plan §9.
 # ====================================================================
 
-# --- OIDC Core (must match production) ---
+# --- OIDC Core (must match your Keycloak realm) ---
 sso.defaultClient = oidc
-sso.callbackUrl = https://mail.jaraguadosul.sc.gov.br/service/extension/oidc/callback
-oidc.callbackUrl = https://mail.jaraguadosul.sc.gov.br/service/extension/oidc/callback
-oidc.discoveryUri = https://sso.jaraguadosul.sc.gov.br/realms/pmjs/.well-known/openid-configuration
-oidc.id = pmjs-zimbra
+sso.callbackUrl = https://<YOUR-ZIMBRA-HOST>/service/extension/oidc/callback
+oidc.callbackUrl = https://<YOUR-ZIMBRA-HOST>/service/extension/oidc/callback
+oidc.discoveryUri = https://<YOUR-KEYCLOAK-HOST>/realms/<YOUR-REALM>/.well-known/openid-configuration
+oidc.id = <YOUR-CLIENT-ID>
 oidc.scope = openid,profile,email
 oidc.preferredJwsAlgorithm = RS256
 oidc.useNonce = false
@@ -17,10 +17,10 @@ oidc.withState = true
 oidc.clientAuthenticationMethod = client_secret_basic
 
 # --- Logout Token Validation ---
-oidc.logoutToken.issuer = https://sso.jaraguadosul.sc.gov.br/realms/pmjs
-oidc.logoutToken.clientId = pmjs-zm-zimbra-bcl
+oidc.logoutToken.issuer = https://<YOUR-KEYCLOAK-HOST>/realms/<YOUR-REALM>
+oidc.logoutToken.clientId = <YOUR-BACKCHANNEL-CLIENT-ID>
 oidc.logoutToken.jwsAlgorithm = RS256
-oidc.logoutToken.jwksUrl = https://sso.jaraguadosul.sc.gov.br/realms/pmjs/protocol/openid-connect/certs
+oidc.logoutToken.jwksUrl = https://<YOUR-KEYCLOAK-HOST>/realms/<YOUR-REALM>/protocol/openid-connect/certs
 
 # --- Feature Flags (ALL DISABLED for staging) ---
 # Phase 8.1: Install artifact with all features disabled.
@@ -30,33 +30,23 @@ oidc.logoutToken.jwksUrl = https://sso.jaraguadosul.sc.gov.br/realms/pmjs/protoc
 
 oidc.sessionSync.enabled = false
 oidc.sessionSync.backchannelEnabled = false
+oidc.sessionSync.watchdogEnabled = false
+oidc.sessionSync.failClosed = true
 
-# Heartbeat timing (seconds)
+# --- Timing ---
 oidc.sessionSync.heartbeatIntervalSeconds = 60
 oidc.sessionSync.minimumServerIntervalSeconds = 30
 oidc.sessionSync.activityGraceSeconds = 1500
 oidc.sessionSync.hiddenTabGraceSeconds = 120
 oidc.sessionSync.refreshBeforeExpirySeconds = 60
-
-# Transient failure handling
 oidc.sessionSync.transientFailureGraceSeconds = 180
 oidc.sessionSync.maxTransientFailures = 3
-oidc.sessionSync.failClosed = true
 
-# Absolute limits (0 = use Keycloak-defined limit)
-oidc.sessionSync.absoluteMaxSeconds = 0
-oidc.sessionSync.allowedOrigin = https://mail.jaraguadosul.sc.gov.br
-
-# Watchdog (server-side abandoned session cleanup)
-oidc.sessionSync.watchdogEnabled = false
+# --- Watchdog ---
 oidc.sessionSync.watchdogIntervalSeconds = 60
 oidc.sessionSync.watchdogBatchSize = 100
 
-# --- Legacy logout config (preserved, unchanged) ---
-sso.saveInSession = true
-sso.multiProfile = true
-sso.renewSession = false
-sso.localLogout = true
-sso.destroySession = true
-sso.centralLogout = true
-sso.postLogoutURL = https://mail.jaraguadosul.sc.gov.br/
+# --- Security ---
+oidc.sessionSync.allowedOrigin = https://<YOUR-ZIMBRA-HOST>
+# 0 = use Keycloak absolute_max_seconds; set >0 to enforce hard cap (seconds)
+oidc.sessionSync.absoluteMaxSeconds = 0
