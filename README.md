@@ -200,6 +200,100 @@ zmprov -l mcf +zimbraCsrfAllowedRefererHosts idp.server.com
 zmmailboxdctl restart
 ```
 
+## Fork: Secure Session Synchronization
+
+This fork extends the upstream `zm-sso` project with **secure session synchronization** between Keycloak and the Zimbra Web Client. It addresses an important problem in the base implementation.
+
+### Problem Identified
+
+When a Keycloak user logs out (via back-channel logout or admin revocation), the upstream `zm-sso` extension has **no mechanism to invalidate the corresponding Zimbra session**. The pac4j session and the Zimbra `ZM_AUTH_TOKEN` cookie remain valid — the user can continue to use the Web Client even though their Keycloak session has been terminated. This is a **security gap**: revocation at the IdP level does not propagate to Zimbra.
+
+Additionally, the upstream extension has no heartbeat mechanism — sessions linger indefinitely in the database with no activity tracking, and there is no watchdog to clean up stale sessions.
+
+### What This Fork Adds
+
+| Capability | Implementation |
+|---|---|
+| **Back-channel logout (OIDC RP-initiated)** | `OidcBackchannelLogoutHandler` — validates `logout_token` (signature, issuer, audience, algorithm, exp, `events`, `sid`, `jti`) and revokes the local session |
+| **Session heartbeat** | `KeepAliveHandler` endpoint + Zimlet-injected browser JS — periodic POST from the browser keeps the session alive; verifies OIDC profile is still valid; triggers silent re-authentication if the Keycloak session expired |
+| **Transient failure handling** | When Keycloak is temporarily unreachable, sessions enter a `TRANSIENT_ERROR` state with retry logic (503 + `Retry-After`); after a grace period, fail-closed to 401 |
+| **Session watchdog** | `SessionSyncWatchdog` background thread — expires stale sessions (default 240s threshold) and clears old transient-error states |
+| **Structured audit logging** | `AuditLog` utility — emits `AUDIT|EVENT|account=...|sid_hash=...|reason=...|result=...` for all security-relevant events (11 event types) |
+| **Zimlet for browser heartbeat** | `com_zimbra_sso_keepalive` — injects `sso-keepalive.js` into both Classic and Modern Webmail UI; implements activity monitoring, visibility gate, multi-tab leader election, and jittered polling |
+| **Staging configuration** | `conf/zm-sso.properties.staging` — all feature flags disabled by default, ready for gradual rollout |
+
+### Architecture
+
+```
+Browser (via Zimlet)
+   │ POST /sso/keepalive (X-Zm-Sso-Heartbeat CSRF header)
+   ▼
+KeepAliveHandler
+   ├── Validate Zimbra HTTP session
+   ├── Validate pac4j profile (verify against Keycloak userinfo)
+   ├── If expired → silent OIDC refresh (no user interaction)
+   ├── If Keycloak unreachable → 503 + Retry-After (transient)
+   ├── Update DB heartbeat (by sid_hash)
+   └── Audit: HEARTBEAT_ACCEPTED / TOKEN_REFRESHED / TRANSIENT_PROVIDER_FAILURE
+
+Back-channel logout (Keycloak → Zimbra)
+   │ POST /oidc/backchannel-logout (logout_token JWT)
+   ▼
+OidcBackchannelLogoutHandler
+   ├── Validate logout_token (signature, claims, jti replay check)
+   ├── Mark DB session as REVOKED
+   ├── Attempt to invalidate Zimbra auth token (fail-closed configurable)
+   └── Audit: BACKCHANNEL_LOGOUT / LOCAL_TOKEN_INVALIDATED
+
+Watchdog (background thread, 60s interval)
+   ├── Expire stale sessions (240s threshold)
+   ├── Clear old transient-error states
+   └── Audit: HEARTBEAT_TIMEOUT
+```
+
+### Feature Flags
+
+```properties
+# Core features (enable after staging validation)
+oidc.sessionSync.enabled = true        # Heartbeat + DB tracking
+oidc.sessionSync.backchannelEnabled = true  # Back-channel logout
+oidc.sessionSync.watchdogEnabled = true   # Background cleanup
+
+# Transient failure handling (fail-closed recommended)
+oidc.sessionSync.failClosed = true
+oidc.sessionSync.maxTransientFailures = 3
+oidc.sessionSync.transientFailureGraceSeconds = 180
+
+# Timing
+oidc.sessionSync.heartbeatIntervalSeconds = 60
+oidc.sessionSync.activityGraceSeconds = 1500
+```
+
+> See `conf/zm-sso.properties.staging` (all flags `false`) for the safe starting configuration.
+
+### Graduation / Rollout Order
+
+Per the implementation plan, features should be enabled gradually:
+
+1. **Back-channel logout** → enable first (lowest risk, immediate security win)
+2. **Session sync (heartbeat)** → enable after back-channel proves stable
+3. **Watchdog** → enable last (cleanup is non-critical for security)
+
+### Database Schema Changes
+
+The `sso_session` table is extended with:
+- `sid_hash` — SHA-256 of the OIDC `sid` claim (links Keycloak session to DB row)
+- `transient_failure_count` — counter for transient Keycloak errors
+- `status` — `ACTIVE` / `REVOKED` / `EXPIRED` / `TRANSIENT_ERROR` / `LOGGED_OUT`
+- `logout_jti` — for replay protection
+
+Migrations are idempotent and use `INFORMATION_SCHEMA` checks (MariaDB-compatible).
+
+### Documentation
+
+- [Implementation Plan](docs/IMPLEMENTACAO_SEGURA_SINCRONIZACAO_SESSOES.md) — full 9-phase plan (in Portuguese)
+- [Final Implementation Report](RELATORIO_FINAL_IMPLEMENTACAO.md) — comprehensive technical report
+
 ## Tutorials
 * [Single sign on with WSO2 Identity Server](docs/wso2-is.md)
 * [Single sign on with Keycloak](docs/keycloak.md)
