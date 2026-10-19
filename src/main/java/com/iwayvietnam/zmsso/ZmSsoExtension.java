@@ -1,99 +1,118 @@
-/*
- * ***** BEGIN LICENSE BLOCK *****
- * Zm SSO is the Zimbra Collaboration Open Source Edition extension for single sign-on authentication to the Zimbra Web Client.
- * Copyright (C) 2020-present iWay Vietnam and/or its affiliates. All rights reserved.
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Affero General Public License for more details.
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>
- * ***** END LICENSE BLOCK *****
- *
- * Zimbra Single Sign On
- *
- * Written by Nguyen Van Nguyen <nguyennv1981@gmail.com>
- */
 package com.iwayvietnam.zmsso;
 
-import com.iwayvietnam.zmsso.cas.*;
+import com.iwayvietnam.zmsso.CallbackHandler;
+import com.iwayvietnam.zmsso.KeepAliveHandler;
+import com.iwayvietnam.zmsso.KeepAliveJsHandler;
+import com.iwayvietnam.zmsso.LoginHandler;
+import com.iwayvietnam.zmsso.LogoutHandler;
+import com.iwayvietnam.zmsso.cas.CasCallbackHandler;
+import com.iwayvietnam.zmsso.cas.CasLoginHandler;
 import com.iwayvietnam.zmsso.db.DbSsoSession;
-import com.iwayvietnam.zmsso.oidc.*;
-import com.iwayvietnam.zmsso.saml.*;
+import com.iwayvietnam.zmsso.oidc.OidcBackchannelLogoutHandler;
+import com.iwayvietnam.zmsso.oidc.OidcCallbackHandler;
+import com.iwayvietnam.zmsso.oidc.OidcLoginHandler;
+import com.iwayvietnam.zmsso.pac4j.ConfigBuilder;
+import com.iwayvietnam.zmsso.saml.SamlCallbackHandler;
+import com.iwayvietnam.zmsso.saml.SamlLoginHandler;
+import com.iwayvietnam.zmsso.saml.SamlMetadataHandler;
+import com.iwayvietnam.zmsso.saml.SamlSloHandler;
 import com.iwayvietnam.zmsso.service.GetAllSsoSessions;
 import com.iwayvietnam.zmsso.util.Log;
 import com.zimbra.common.service.ServiceException;
 import com.zimbra.cs.extension.ExtensionDispatcherServlet;
 import com.zimbra.cs.extension.ExtensionException;
+import com.zimbra.cs.extension.ExtensionHttpHandler;
 import com.zimbra.cs.extension.ZimbraExtension;
+import com.zimbra.soap.DocumentHandler;
 import com.zimbra.soap.SoapServlet;
 
-/**
- * Zimbra Single Sign On Extension
- * @author Nguyen Van Nguyen <nguyennv1981@gmail.com>
- */
-public class ZmSsoExtension implements ZimbraExtension {
-    public static final String E_GET_ALL_SSO_SESSIONS_REQUEST = "GetAllSsoSessionsRequest";
-    public static final String E_GET_ALL_SSO_SESSIONS_RESPONSE = "GetAllSsoSessionsResponse";
+    public class ZmSsoExtension
+    implements ZimbraExtension {
+        public static final String E_GET_ALL_SSO_SESSIONS_REQUEST = "GetAllSsoSessionsRequest";
+        public static final String E_GET_ALL_SSO_SESSIONS_RESPONSE = "GetAllSsoSessionsResponse";
+        private static final String EXTENSION_NAME = "com_iwayvietnam_zmsso";
 
-    private static final String EXTENSION_NAME = "com_iwayvietnam_zmsso";
+        // Phase 4: Watchdog reference for clean shutdown
+        private SessionSyncWatchdog watchdog;
 
-    @Override
     public String getName() {
         return EXTENSION_NAME;
     }
 
-    @Override
     public void init() throws ExtensionException, ServiceException {
         DbSsoSession.createSsoSessionTable();
-
-        Log.sso.info("Register sso handlers");
-        ExtensionDispatcherServlet.register(this, new LoginHandler());
-        ExtensionDispatcherServlet.register(this, new CallbackHandler());
-        ExtensionDispatcherServlet.register(this, new LogoutHandler());
-        ExtensionDispatcherServlet.register(this, new KeepAliveHandler());
-
+        Log.sso.info((Object) "Register sso handlers");
+        ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new LoginHandler());
+        ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new CallbackHandler());
+        ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new LogoutHandler());
+        ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new KeepAliveHandler());
         try {
-            Log.sso.info("Register saml sso handlers");
-            ExtensionDispatcherServlet.register(this, new SamlMetadataHandler());
-            ExtensionDispatcherServlet.register(this, new SamlLoginHandler());
-            ExtensionDispatcherServlet.register(this, new SamlCallbackHandler());
-            ExtensionDispatcherServlet.register(this, new SamlSloHandler());
-        } catch (final ExtensionException e) {
-            Log.sso.error(e);
+            Log.sso.info((Object) "Register saml sso handlers");
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new SamlMetadataHandler());
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new SamlLoginHandler());
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new SamlCallbackHandler());
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new SamlSloHandler());
+        } catch (ExtensionException extensionException) {
+            Log.sso.error((Object) extensionException);
+        }
+        try {
+            Log.sso.info((Object) "Register cas sso handlers");
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new CasLoginHandler());
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new CasCallbackHandler());
+        } catch (ExtensionException extensionException) {
+            Log.sso.error((Object) extensionException);
+        }
+        try {
+            Log.sso.info((Object) "Register oidc sso handlers");
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new OidcLoginHandler());
+            ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new OidcCallbackHandler());
+
+            // Phase 3: Register dedicated back-channel logout handler (only when enabled)
+            ConfigBuilder configBuilder = ConfigBuilder.getInstance();
+            if (configBuilder.getBackchannelEnabled()) {
+                Log.sso.info((Object) "Register back-channel logout handler");
+                ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new OidcBackchannelLogoutHandler());
+            } else {
+                Log.sso.info((Object) "Back-channel logout disabled, skipping handler registration");
+            }
+        } catch (ExtensionException extensionException) {
+            Log.sso.error((Object) extensionException);
         }
 
-        try {
-            Log.sso.info("Register cas sso handlers");
-            ExtensionDispatcherServlet.register(this, new CasLoginHandler());
-            ExtensionDispatcherServlet.register(this, new CasCallbackHandler());
-        } catch (final ExtensionException e) {
-            Log.sso.error(e);
+        // Phase 4: Register keepalive JS handler (only when sessionSync enabled)
+        ConfigBuilder configBuilder = ConfigBuilder.getInstance();
+        if (configBuilder.getSessionSyncEnabled()) {
+            Log.sso.info((Object) "Register keepalive JS handler");
+            try {
+                ExtensionDispatcherServlet.register((ZimbraExtension) this, (ExtensionHttpHandler) new KeepAliveJsHandler());
+            } catch (ServiceException e) {
+                Log.sso.error((Object) e);
+            }
+        } else {
+            Log.sso.info((Object) "Session sync disabled, skipping keepalive JS handler registration");
         }
 
-        try {
-            Log.sso.info("Register oidc sso handlers");
-            ExtensionDispatcherServlet.register(this, new OidcLoginHandler());
-            ExtensionDispatcherServlet.register(this, new OidcCallbackHandler());
-        } catch (final ExtensionException e) {
-            Log.sso.error(e);
+        // Phase 4: Start watchdog thread (only when watchdogEnabled)
+        if (configBuilder.getWatchdogEnabled()) {
+            Log.sso.info((Object) "Starting session sync watchdog");
+            this.watchdog = new SessionSyncWatchdog();
+            this.watchdog.start();
+        } else {
+            Log.sso.info((Object) "Watchdog disabled, not starting");
         }
 
-        SoapServlet.addService("AdminServlet", dispatcher -> {
-            Log.sso.info("Register admin soap services");
-            dispatcher.registerHandler(GetAllSsoSessions.GET_ALL_SSO_SESSIONS_REQUEST, new GetAllSsoSessions());
+        SoapServlet.addService((String) "AdminServlet", documentDispatcher -> {
+            Log.sso.info((Object) "Register admin soap services");
+            documentDispatcher.registerHandler(GetAllSsoSessions.GET_ALL_SSO_SESSIONS_REQUEST, (DocumentHandler) new GetAllSsoSessions());
         });
     }
 
-    @Override
     public void destroy() {
-        Log.sso.info("Unregister sso extension");
-        ExtensionDispatcherServlet.unregister(this);
+        Log.sso.info((Object) "Unregister sso extension");
+        // Phase 4: Stop watchdog thread
+        if (this.watchdog != null) {
+            this.watchdog.stop();
+        }
+        ExtensionDispatcherServlet.unregister((ZimbraExtension) this);
     }
 }

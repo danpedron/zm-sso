@@ -16,25 +16,18 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>
  * ***** END LICENSE BLOCK *****
  *
- * Zimbra Single Sign On - Keep Alive JavaScript
+ * Zimbra Single Sign On — Keep Alive JavaScript (Phase 5)
  *
- * This JavaScript is loaded into the Zimbra Web Client to periodically call
- * the /sso/keepalive endpoint, which renews the OIDC access token (every 5 min
- * by default) and keeps the Keycloak SSO session alive while the user is
- * actively using the Webmail.
+ * Full-featured browser-side heartbeat with:
+ *   - Activity monitoring (pointerdown, keydown, touchstart, visibility)
+ *   - Visibility gate: heartbeat only when tab is visible & active within grace
+ *   - Hidden tab grace: short allowence when tab hidden, then stop
+ *   - Multi-tab leader election via BroadcastChannel (localStorage fallback)
+ *   - Recursive setTimeout with jitter (never setInterval)
+ *   - POST with CSRF header (X-Zm-Sso-Heartbeat)
+ *   - Response handling: 200/204/401/403/429/503 with Retry-After
  *
- * Installation (optional):
- *   Copy this file to /opt/zimbra/jetty_base/webapps/zimbra/js/
- *   Add the following line to the Zimbra Web Client (e.g., via
- *   /opt/zimbra/jetty_base/webapps/zimbra/hiddenTagline.jsp or
- *   a custom zimlet):
- *
- *     <script src="/service/extension/sso/keepalive.js"></script>
- *
- * Configuration:
- *   The KEEPALIVE_INTERVAL_MS controls how often the keepalive is called.
- *   Set to 120000 (2 minutes) by default — should be less than the
- *   Jetty session timeout (30 min) and Keycloak access token lifespan (5 min).
+ * Configuration via window.SO_SSO_CONFIG or server response fields.
  *
  * Written by danpedron
  */
@@ -42,72 +35,300 @@
 (function() {
     'use strict';
 
-    // Interval in milliseconds between keepalive calls.
-    // Default: 2 minutes (120000 ms). Should be less than the access token
-    // lifespan (5 min in this deployment) to ensure the token is refreshed
-    // before it expires.
-    var KEEPALIVE_INTERVAL_MS = window.SO_KEEPALIVE_INTERVAL_MS || 120000;
+    // ─── Configuration ────────────────────────────────────────────────
+    var config = window.SO_SSO_CONFIG || {
+        heartbeatIntervalSeconds: 60,
+        activityGraceSeconds: 1500,
+        hiddenTabGraceSeconds: 120,
+        transientFailureGraceSeconds: 180,
+        maxTransientFailures: 3,
+        jitterPercent: 0.10,
+        leaderKey: 'default'
+    };
 
-    // The keepalive endpoint URL
+    var LEADER_CHANNEL = 'zm-sso-leader-election';
+    var LEADER_KEY = 'zm-sso-leader-' + config.leaderKey;
+
+    // Runtime state
+    var state = {
+        intervalMs: (config.heartbeatIntervalSeconds * 1000) || 60000,
+        lastActivity: Date.now(),
+        lastHeartbeat: 0,
+        initialized: false,
+        isLeader: false,
+        leaderExpiry: 0,
+        transientFailureCount: 0,
+        LEADER_LEASE_MS: 30000,
+        LEADER_RENEW_MS: 15000,
+    };
+
     var KEEPALIVE_URL = '/service/extension/sso/keepalive';
+    var bc = null;  // BroadcastChannel
 
-    var initialized = false;
+    // ─── Activity Monitoring ────────────────────────────────────────────
 
-    function startKeepAlive() {
-        if (initialized) {
-            return;
+    function trackActivity() {
+        state.lastActivity = Date.now();
+    }
+
+    function shouldHeartbeat() {
+        var now = Date.now();
+        var sinceActivity = now - state.lastActivity;
+
+        if (document.visibilityState !== 'visible') {
+            if (sinceActivity > config.hiddenTabGraceSeconds * 1000) {
+                return false;
+            }
         }
-        initialized = true;
 
-        console.log('[SSO KeepAlive] Starting periodic keepalive to ' + KEEPALIVE_URL +
-            ' every ' + (KEEPALIVE_INTERVAL_MS / 1000) + 's');
+        if (sinceActivity > config.activityGraceSeconds * 1000) {
+            return false;
+        }
 
-        // Initial call after a short delay (let the page load first)
-        setTimeout(sendKeepAlive, 5000);
+        return true;
+    }
+
+    // ─── Multi-Tab Leader Election ──────────────────────────────────────
+
+    function generateTabId() {
+        return 'tab_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+    }
+
+    var myTabId = generateTabId();
+
+    function tryAcquireLeadership() {
+        var now = Date.now();
+        if (state.isLeader && now < state.leaderExpiry) {
+            return true;
+        }
+
+        // Try to claim leadership via localStorage (last-writer-wins with TTL)
+        var existing = localStorage.getItem(LEADER_KEY);
+        if (existing) {
+            try {
+                var parsed = JSON.parse(existing);
+                if (parsed.expiry > now && parsed.tabId !== myTabId) {
+                    state.isLeader = false;
+                    return false;
+                }
+            } catch (e) { /* stale entry */ }
+        }
+
+        // Claim leadership
+        var candidate = { tabId: myTabId, expiry: now + state.LEADER_LEASE_MS };
+        localStorage.setItem(LEADER_KEY, JSON.stringify(candidate));
+
+        // Verify we still hold it (race condition check)
+        var verify = localStorage.getItem(LEADER_KEY);
+        try {
+            var v = JSON.parse(verify);
+            if (v.tabId === myTabId) {
+                state.isLeader = true;
+                state.leaderExpiry = now + state.LEADER_LEASE_MS;
+                announceLeadership(true);
+                scheduleLeadershipRefresh();
+                return true;
+            }
+        } catch (e) { /* won the race */ }
+
+        state.isLeader = false;
+        return false;
+    }
+
+    function announceLeadership(leader) {
+        if (bc) {
+            try {
+                bc.postMessage({ type: 'leader', value: leader });
+            } catch (e) {}
+        }
+    }
+
+    function scheduleLeadershipRefresh() {
+        if (!state.isLeader) return;
+        var remaining = state.leaderExpiry - Date.now();
+        if (remaining < state.LEADER_RENEW_MS) return;
+
+        setTimeout(function() {
+            if (state.isLeader) {
+                tryAcquireLeadership();
+            }
+        }, Math.min(remaining - state.LEADER_RENEW_MS, 5000));
+    }
+
+    function initBroadcastChannel() {
+        if (typeof BroadcastChannel !== 'undefined') {
+            try {
+                bc = new BroadcastChannel(LEADER_CHANNEL);
+                bc.onmessage = function(event) {
+                    if (event.data && event.data.type === 'leader' && event.data.value === true) {
+                        state.isLeader = false;
+                    }
+                };
+            } catch (e) {
+                bc = null;
+            }
+        }
+
+        // Fallback: localStorage 'storage' event
+        if (!bc) {
+            window.addEventListener('storage', function(event) {
+                if (event.key === LEADER_KEY) {
+                    if (event.newValue) {
+                        state.isLeader = false;
+                    }
+                }
+            });
+        }
+    }
+
+    // ─── Heartbeat ──────────────────────────────────────────────────────
+
+    function jitter(interval) {
+        var delta = interval * config.jitterPercent;
+        return interval + (Math.random() * 2 - 1) * delta;
+    }
+
+    function getIntervalMs() {
+        return jitter(state.intervalMs);
     }
 
     function sendKeepAlive() {
+        // Only leader tab sends heartbeats
+        if (!state.isLeader) {
+            tryAcquireLeadership();
+        }
+        if (!state.isLeader) {
+            setTimeout(sendKeepAlive, jitter(5000));
+            return;
+        }
+
+        if (!shouldHeartbeat()) {
+            setTimeout(sendKeepAlive, jitter(10000));
+            return;
+        }
+
+        trackActivity();
+
         fetch(KEEPALIVE_URL, {
-            method: 'GET',
+            method: 'POST',
             credentials: 'same-origin',
             headers: {
+                'Content-Type': 'application/json',
+                'X-Zm-Sso-Heartbeat': '1',
                 'X-Requested-With': 'XMLHttpRequest',
                 'Cache-Control': 'no-cache, no-store'
-            }
+            },
+            body: JSON.stringify({})
         }).then(function(response) {
-            if (response.status === 200) {
-                // Token refreshed or still valid — schedule next call
-                setTimeout(sendKeepAlive, KEEPALIVE_INTERVAL_MS);
+            state.lastHeartbeat = Date.now();
+
+            // Read interval from header (works for 200/204)
+            var serverInterval = response.headers.get('X-Heartbeat-Interval');
+            if (serverInterval) {
+                state.intervalMs = parseInt(serverInterval, 10) * 1000;
+                config.heartbeatIntervalSeconds = parseInt(serverInterval, 10);
+            }
+
+            if (response.status === 200 || response.status === 204) {
+                // Try to read JSON for additional config (non-204 responses)
+                if (response.status === 200) {
+                    response.json().then(function(data) {
+                        if (data && data.heartbeatInterval) {
+                            state.intervalMs = data.heartbeatInterval * 1000;
+                            config.heartbeatIntervalSeconds = data.heartbeatInterval;
+                        }
+                        state.transientFailureCount = 0;
+                        setTimeout(sendKeepAlive, getIntervalMs());
+                    }).catch(function() {
+                        state.transientFailureCount = 0;
+                        setTimeout(sendKeepAlive, getIntervalMs());
+                    });
+                } else {
+                    state.transientFailureCount = 0;
+                    setTimeout(sendKeepAlive, getIntervalMs());
+                }
             } else if (response.status === 401) {
-                // Session expired on Keycloak — force re-authentication
-                console.log('[SSO KeepAlive] Session expired on IdP, redirecting to login');
+                state.transientFailureCount = 0;
+                console.warn('[SSO KeepAlive] Session expired/revoked (401), redirecting to login');
                 window.location.href = '/service/extension/oidc/login';
+            } else if (response.status === 403) {
+                state.transientFailureCount = 0;
+                console.error('[SSO KeepAlive] Security violation (403), blocking');
+            } else if (response.status === 429) {
+                var retryAfter = (response.headers.get('Retry-After') || '30');
+                var retrySec = parseInt(retryAfter, 10);
+                if (isNaN(retrySec)) retrySec = 30;
+                setTimeout(sendKeepAlive, retrySec * 1000);
+            } else if (response.status === 503) {
+                state.transientFailureCount++;
+                if (state.transientFailureCount < config.maxTransientFailures) {
+                    var retryAfter503 = response.headers.get('Retry-After');
+                    var retryDelay = retryAfter503 ? parseInt(retryAfter503, 10) * 1000 : 30000;
+                    console.warn('[SSO KeepAlive] Transient failure ' + state.transientFailureCount + '/' +
+                        config.maxTransientFailures + ', retrying in ' + (retryDelay / 1000) + 's');
+                    setTimeout(sendKeepAlive, retryDelay);
+                } else {
+                    console.error('[SSO KeepAlive] Max transient failures exceeded, redirecting to login');
+                    window.location.href = '/service/extension/oidc/login';
+                }
             } else {
-                // Unexpected error — retry after a shorter interval
-                console.warn('[SSO KeepAlive] Unexpected response: ' + response.status +
-                    ' — retrying in 30s');
+                console.warn('[SSO KeepAlive] Unexpected response: ' + response.status + ', retrying in 30s');
                 setTimeout(sendKeepAlive, 30000);
             }
         }).catch(function(error) {
-            console.error('[SSO KeepAlive] Network error: ' + error.message +
-                ' — retrying in 30s');
-            setTimeout(sendKeepAlive, 30000);
+            state.transientFailureCount++;
+            if (state.transientFailureCount < config.maxTransientFailures) {
+                console.warn('[SSO KeepAlive] Network error: ' + error.message +
+                    ', retrying in 30s (attempt ' + state.transientFailureCount + ')');
+                setTimeout(sendKeepAlive, 30000);
+            } else {
+                console.warn('[SSO KeepAlive] Max retries exceeded after network errors');
+                state.transientFailureCount = 0;
+                setTimeout(sendKeepAlive, 60000);
+            }
         });
     }
 
-    // Start the keepalive loop once the page has loaded
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', startKeepAlive);
-    } else {
-        startKeepAlive();
+    // ─── Initialization ─────────────────────────────────────────────────
+
+    function start() {
+        if (state.initialized) return;
+        state.initialized = true;
+
+        initBroadcastChannel();
+        trackActivity();
+
+        // Activity event listeners (throttled)
+        var activityEvents = ['pointerdown', 'keydown', 'touchstart', 'mousedown', 'scroll', 'visibilitychange'];
+        activityEvents.forEach(function(evt) {
+            document.addEventListener(evt, trackActivity, { passive: true, capture: true });
+        });
+
+        window.addEventListener('focus', trackActivity, { passive: true, capture: true });
+
+        // On visibility change: if becoming visible, send heartbeat immediately
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible') {
+                trackActivity();
+                if (state.isLeader) {
+                    sendKeepAlive();
+                }
+            }
+        });
+
+        console.log('[SSO KeepAlive] Phase 5 heartbeat initialized (leader election: BroadcastChannel=' + (!!bc) + ')');
+        setTimeout(function() {
+            if (tryAcquireLeadership()) {
+                sendKeepAlive();
+            } else {
+                setTimeout(sendKeepAlive, jitter(10000));
+            }
+        }, 2000);
     }
 
-    // Also start when the Web Client becomes visible again (e.g., user
-    // returns to the tab after a period of inactivity)
-    document.addEventListener('visibilitychange', function() {
-        if (!document.hidden && initialized) {
-            // User returned to the tab — fire an immediate keepalive
-            sendKeepAlive();
-        }
-    });
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', start);
+    } else {
+        start();
+    }
 })();

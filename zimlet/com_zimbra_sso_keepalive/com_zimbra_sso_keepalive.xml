@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * ***** BEGIN LICENSE BLOCK *****
+ * Zm SSO is the Zimbra Collaboration Open Source Edition extension for single sign-on authentication.
+ * Copyright (C) 2020-present iWay Vietnam and/or its affiliates. All rights reserved.
+ * ***** END LICENSE BLOCK *****
+-->
+<zimlet name="com_zimbra_sso_keepalive"
+        version="2.0.0"
+        label="${msg.zimletLabel}"
+        target="main view-window"
+        description="${msg.description}">
+    <include>keepalive.js</include>
+    <includeCSS/>
+    <handlerObject>com_zimbra_sso_keepalive_HandlerObject</handlerObject>
+</zimlet>
